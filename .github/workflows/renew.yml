@@ -34,15 +34,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install playwright
           python -m playwright install --with-deps chromium
+          # real Chrome is far more likely to pass Turnstile than bundled Chromium
+          python -m playwright install chrome || sudo apt-get install -y google-chrome-stable
 
-      - name: Run renewal
+      - name: Run renewal (virtual display)
         id: run
         continue-on-error: true
         env:
           KB_EMAIL: ${{ secrets.KB_EMAIL }}
           KB_PASSWORD: ${{ secrets.KB_PASSWORD }}
-          KB_HEADLESS: ${{ github.event.inputs.headless || '1' }}
-        run: python src/renew.py
+          KB_HEADLESS: "0"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+          xvfb-run -a --server-args="-screen 0 1366x900x24" python src/renew.py
 
       - name: Show result
         if: always()

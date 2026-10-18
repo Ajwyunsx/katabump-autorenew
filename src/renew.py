@@ -86,12 +86,17 @@ def click_turnstile(page, label: str) -> bool:
             except Exception:  # noqa: BLE001
                 continue
 
-    # 2) absolute coordinates of the widget container
+    # 2) coordinates inside the widget: checkbox sits ~(19,27) from its top-left
     try:
         box = page.locator(".cf-turnstile").first.bounding_box()
         if box:
-            x = box["x"] + 30
-            y = box["y"] + box["height"] / 2
+            x = box["x"] + 19
+            y = box["y"] + 27
+            # human-like move
+            page.mouse.move(box["x"] - 40, box["y"] - 30, steps=12)
+            time.sleep(0.3)
+            page.mouse.move(x, y, steps=9)
+            time.sleep(0.25)
             page.mouse.click(x, y)
             log(f"{label}: clicked turnstile at ({x:.0f},{y:.0f})")
             return True
@@ -170,14 +175,20 @@ def main() -> int:
     result = {"ok": False, "renewed": False, "details": []}
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=HEADLESS,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
+        launch_args = [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=IsolateOrigins,site-per-process",
+        ]
+        try:
+            browser = p.chromium.launch(
+                headless=HEADLESS, channel="chrome", args=launch_args
+            )
+            log("launched real Chrome channel")
+        except Exception as exc:  # noqa: BLE001
+            log(f"chrome channel unavailable ({exc}); using bundled chromium")
+            browser = p.chromium.launch(headless=HEADLESS, args=launch_args)
         ctx = browser.new_context(
             viewport={"width": 1366, "height": 900},
             locale="en-US",
