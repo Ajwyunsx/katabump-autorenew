@@ -70,38 +70,69 @@ def turnstile_token(page) -> str:
 
 
 def click_turnstile(page, label: str) -> bool:
-    """Click the Turnstile checkbox, trying frames then absolute coordinates."""
-    # 1) try inside the challenge iframe
+    """Poke the Turnstile checkbox through several strategies."""
+    # A) DOM-level dispatch inside every cf frame
+    try:
+        clicked = page.evaluate(
+            """() => {
+                const frames = Array.from(document.querySelectorAll('iframe'));
+                for (const f of frames) {
+                    if (!(f.src || '').includes('challenges.cloudflare.com')) continue;
+                    let doc;
+                    try { doc = f.contentDocument; } catch (e) { continue; }
+                    if (!doc) continue;
+                    const cb = doc.querySelector('input[type=checkbox]') || doc.body;
+                    if (!cb) continue;
+                    const r = cb.getBoundingClientRect();
+                    const opts = {bubbles: true, cancelable: true, clientX: r.left + 5, clientY: r.top + 5};
+                    cb.dispatchEvent(new MouseEvent('mouseover', opts));
+                    cb.dispatchEvent(new MouseEvent('mousedown', opts));
+                    cb.dispatchEvent(new MouseEvent('mouseup', opts));
+                    cb.dispatchEvent(new MouseEvent('click', opts));
+                    if (cb.click) cb.click();
+                    return true;
+                }
+                return false;
+            }"""
+        )
+        if clicked:
+            log(f"{label}: dispatched DOM click inside turnstile iframe")
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log(f"{label}: dom dispatch failed: {exc}")
+
+    # B) playwright frame locator on the checkbox itself
     for frame in page.frames:
         if "challenges.cloudflare.com" not in (frame.url or ""):
             continue
-        for sel in ("input[type=checkbox]", "label[for]", "#challenge-stage", "body"):
+        for sel in ("input[type=checkbox]", "label", "#challenge-stage"):
             try:
                 loc = frame.locator(sel).first
                 if loc.count() == 0:
                     continue
-                loc.click(timeout=3000, force=True)
-                log(f"{label}: clicked {sel} inside turnstile frame")
+                bbox = loc.bounding_box()
+                if not bbox:
+                    continue
+                cx = bbox["x"] + bbox["width"] / 2
+                cy = bbox["y"] + bbox["height"] / 2
+                page.mouse.move(bbox["x"] + 5, bbox["y"] + 5, steps=8)
+                page.mouse.click(cx, cy)
+                log(f"{label}: clicked {sel} at ({cx:.0f},{cy:.0f}) in frame")
                 return True
             except Exception:  # noqa: BLE001
                 continue
 
-    # 2) coordinates inside the widget: checkbox sits ~(19,27) from its top-left
+    # C) widget box coordinates
     try:
         box = page.locator(".cf-turnstile").first.bounding_box()
         if box:
-            x = box["x"] + 19
-            y = box["y"] + 27
-            # human-like move
-            page.mouse.move(box["x"] - 40, box["y"] - 30, steps=12)
-            time.sleep(0.3)
-            page.mouse.move(x, y, steps=9)
-            time.sleep(0.25)
+            x, y = box["x"] + 19, box["y"] + 27
+            page.mouse.move(box["x"] - 30, box["y"] - 20, steps=10)
             page.mouse.click(x, y)
-            log(f"{label}: clicked turnstile at ({x:.0f},{y:.0f})")
+            log(f"{label}: clicked widget box at ({x:.0f},{y:.0f})")
             return True
     except Exception as exc:  # noqa: BLE001
-        log(f"{label}: coordinate click failed: {exc}")
+        log(f"{label}: box click failed: {exc}")
     return False
 
 
