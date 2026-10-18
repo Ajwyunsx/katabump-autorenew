@@ -62,8 +62,6 @@ def turnstile_token(page) -> str:
                 for (const el of els) {
                     if (el.value && el.value.length > 10) return el.value;
                 }
-                const w = document.querySelector('.cf-turnstile');
-                if (w && w.getAttribute('data-response')) return w.getAttribute('data-response');
                 return '';
             }"""
         )
@@ -71,37 +69,52 @@ def turnstile_token(page) -> str:
         return ""
 
 
+def click_turnstile(page, label: str) -> bool:
+    """Click the Turnstile checkbox, trying frames then absolute coordinates."""
+    # 1) try inside the challenge iframe
+    for frame in page.frames:
+        if "challenges.cloudflare.com" not in (frame.url or ""):
+            continue
+        for sel in ("input[type=checkbox]", "label[for]", "#challenge-stage", "body"):
+            try:
+                loc = frame.locator(sel).first
+                if loc.count() == 0:
+                    continue
+                loc.click(timeout=3000, force=True)
+                log(f"{label}: clicked {sel} inside turnstile frame")
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+
+    # 2) absolute coordinates of the widget container
+    try:
+        box = page.locator(".cf-turnstile").first.bounding_box()
+        if box:
+            x = box["x"] + 30
+            y = box["y"] + box["height"] / 2
+            page.mouse.click(x, y)
+            log(f"{label}: clicked turnstile at ({x:.0f},{y:.0f})")
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log(f"{label}: coordinate click failed: {exc}")
+    return False
+
+
 def wait_turnstile(page, label: str, budget: int = 120) -> str:
     """Wait for the Turnstile widget to produce a token."""
     deadline = time.time() + budget
-    clicked = False
+    attempts = 0
     while time.time() < deadline:
         tok = turnstile_token(page)
         if tok:
             log(f"{label}: turnstile token ready (len={len(tok)})")
             return tok
-        try:
-            body = page.inner_text("body", timeout=3000)
-        except Exception:  # noqa: BLE001
-            body = ""
-        if "Verifying" not in body and "Success" in body:
+        if attempts < 8:
+            attempts += 1
+            click_turnstile(page, label)
+            time.sleep(6)
+        else:
             time.sleep(2)
-            continue
-        if not clicked and "Verifying" not in body:
-            # widget idle -> nudge the checkbox once
-            for frame in page.frames:
-                if "challenges.cloudflare.com" not in (frame.url or ""):
-                    continue
-                try:
-                    box = frame.locator("input[type=checkbox]").first
-                    if box.count() > 0:
-                        box.click(timeout=3000)
-                        clicked = True
-                        log(f"{label}: clicked turnstile checkbox")
-                        break
-                except Exception:  # noqa: BLE001
-                    continue
-        time.sleep(2)
     log(f"{label}: no turnstile token after {budget}s")
     return ""
 
@@ -184,7 +197,8 @@ def main() -> int:
             log(f"navigating to {LOGIN_URL}")
             page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=90000)
             dismiss_consent(page)
-            wait_turnstile(page, "login-page", budget=90)
+            click_turnstile(page, "login-page")
+            wait_turnstile(page, "login-page", budget=60)
             shot(page, "01-login")
 
             # fill credentials
