@@ -53,50 +53,57 @@ def dismiss_consent(page) -> None:
             continue
 
 
-def wait_cloudflare(page, label: str) -> None:
-    """Wait until the Turnstile challenge stops being evaluated."""
-    for i in range(30):
+def turnstile_token(page) -> str:
+    """Read the Turnstile response token from the page."""
+    try:
+        return page.evaluate(
+            """() => {
+                const els = document.querySelectorAll('input[name="cf-turnstile-response"]');
+                for (const el of els) {
+                    if (el.value && el.value.length > 10) return el.value;
+                }
+                const w = document.querySelector('.cf-turnstile');
+                if (w && w.getAttribute('data-response')) return w.getAttribute('data-response');
+                return '';
+            }"""
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def wait_turnstile(page, label: str, budget: int = 120) -> str:
+    """Wait for the Turnstile widget to produce a token."""
+    deadline = time.time() + budget
+    clicked = False
+    while time.time() < deadline:
+        tok = turnstile_token(page)
+        if tok:
+            log(f"{label}: turnstile token ready (len={len(tok)})")
+            return tok
         try:
-            html = page.content()
+            body = page.inner_text("body", timeout=3000)
         except Exception:  # noqa: BLE001
+            body = ""
+        if "Verifying" not in body and "Success" in body:
             time.sleep(2)
             continue
-        if "Just a moment" not in html and "cf-challenge" not in html:
-            # token present in DOM means Turnstile solved
-            token = page.evaluate(
-                """() => {
-                    const el = document.querySelector('input[name="cf-turnstile-response"]');
-                    return el ? el.value : '';
-                }"""
-            )
-            if token:
-                log(f"{label}: turnstile token acquired (len={len(token)})")
-            else:
-                log(f"{label}: page loaded, no turnstile token field found")
-            return
-        log(f"{label}: waiting for cloudflare challenge ({i + 1}/30)")
-        time.sleep(2)
-    log(f"{label}: cloudflare wait finished without confirmation")
-
-
-def try_turnstile_click(page) -> None:
-    """Turnstile in managed mode may need a click on the checkbox."""
-    frames = []
-    for frame in page.frames:
-        if "challenges.cloudflare.com" in (frame.url or ""):
-            frames.append(frame)
-    for frame in frames:
-        for sel in ("input[type=checkbox]", "label", "#challenge-stage", "body"):
-            try:
-                loc = frame.locator(sel).first
-                if loc.count() == 0:
+        if not clicked and "Verifying" not in body:
+            # widget idle -> nudge the checkbox once
+            for frame in page.frames:
+                if "challenges.cloudflare.com" not in (frame.url or ""):
                     continue
-                loc.click(timeout=2000)
-                log(f"clicked turnstile element: {sel}")
-                time.sleep(2)
-                return
-            except Exception:  # noqa: BLE001
-                continue
+                try:
+                    box = frame.locator("input[type=checkbox]").first
+                    if box.count() > 0:
+                        box.click(timeout=3000)
+                        clicked = True
+                        log(f"{label}: clicked turnstile checkbox")
+                        break
+                except Exception:  # noqa: BLE001
+                    continue
+        time.sleep(2)
+    log(f"{label}: no turnstile token after {budget}s")
+    return ""
 
 
 def is_logged_in(page) -> bool:
@@ -177,7 +184,7 @@ def main() -> int:
             log(f"navigating to {LOGIN_URL}")
             page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=90000)
             dismiss_consent(page)
-            wait_cloudflare(page, "login-page")
+            wait_turnstile(page, "login-page", budget=90)
             shot(page, "01-login")
 
             # fill credentials
@@ -195,8 +202,15 @@ def main() -> int:
                 except Exception:  # noqa: BLE001
                     continue
 
-            try_turnstile_click(page)
-            wait_cloudflare(page, "before-submit")
+            wait_turnstile(page, "before-submit", budget=120)
+
+            tok = turnstile_token(page)
+            if not tok:
+                log("ABORT: turnstile never produced a token; not submitting")
+                shot(page, "02-no-token")
+                result["details"].append("turnstile token missing")
+                result["blocked"] = True
+                return 3
 
             log("submitting login form")
             page.click("button[type='submit'], #submit, button:has-text('Log in')")
